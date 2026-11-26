@@ -22,7 +22,7 @@
       <form onsubmit="handleLogin(event)">
         <div class="form-group">
           <label for="loginUser">管理员账号</label>
-          <input id="loginUser" type="text" placeholder="dark" value="dark" required autocomplete="username">
+          <input id="loginUser" type="text" placeholder="请输入管理员账号" required autocomplete="username">
         </div>
         <div class="form-group">
           <label for="loginPass">登录密码</label>
@@ -30,7 +30,6 @@
         </div>
         <button class="btn btn-primary btn-block" type="submit">登录防火墙控制台</button>
       </form>
-      <div class="login-foot">默认测试账号：<code>dark</code> / <code>Aa666333</code>（登录后可随时修改）</div>
     </div>
   </div>
 
@@ -45,7 +44,7 @@
       <div class="topbar-right">
         <button class="btn btn-outline btn-sm" onclick="toggleTheme()" id="themeBtn">☀️ 浅色</button>
         <button class="btn btn-outline btn-sm" onclick="refreshAll()">🔄 刷新</button>
-        <span class="user-pill" id="currentUserLabel">dark</span>
+        <span class="user-pill" id="currentUserLabel">admin</span>
         <button class="btn btn-outline btn-sm" onclick="handleLogout()">退出</button>
       </div>
     </header>

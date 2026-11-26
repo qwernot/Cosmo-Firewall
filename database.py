@@ -243,8 +243,8 @@ def init_db():
             )
             now = int(time.time())
             # Seed default admin
-            admin_user = os.environ.get("ADMIN_USER", "dark").strip() or "dark"
-            admin_pass = os.environ.get("ADMIN_PASS", "Aa666333").strip() or "Aa666333"
+            admin_user = os.environ.get("ADMIN_USER", "admin").strip() or "admin"
+            admin_pass = os.environ.get("ADMIN_PASS", "admin").strip() or "admin"
             row = conn.execute("SELECT id FROM users WHERE username = ?;", (admin_user,)).fetchone()
             if not row:
                 conn.execute(

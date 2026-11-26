@@ -31,7 +31,7 @@ class TestCosmoFirewall(unittest.TestCase):
         cls.th.start()
         cls.base = f"http://127.0.0.1:{cls.port}"
 
-        st, data = cls._req("/api/v1/auth/login", "POST", {"username": "dark", "password": "Aa666333"})
+        st, data = cls._req("/api/v1/auth/login", "POST", {"username": "admin", "password": "admin"})
         assert st == 200 and data["success"], f"login failed: {data}"
         cls.token = data["token"]
 

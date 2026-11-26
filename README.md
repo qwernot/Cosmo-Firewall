@@ -16,4 +16,4 @@ chmod +x start.sh
 PORT=8090 ./start.sh
 ```
 - 控制台地址：`http://127.0.0.1:8090`
-- 默认管理员账号：`dark` / `Aa666333`（可通过环境变量 `ADMIN_USER` / `ADMIN_PASS` 自定义，或在面板内修改）
+- 默认管理员账号：`admin` / `admin`（可通过环境变量 `ADMIN_USER` / `ADMIN_PASS` 自定义，首次登录后建议立即在面板中修改密码）

@@ -482,6 +482,61 @@ async function handleChangePassword(e) {
   }
 }
 
+async function checkSystemUpdate(switchToTab = false) {
+  if (switchToTab) switchTab("settings");
+  const titleEl = document.getElementById("updateStatusTitle");
+  const descEl = document.getElementById("updateStatusDesc");
+  const btnCheck = document.getElementById("btnCheckUpdate");
+  const btnUp = document.getElementById("btnDoUpgrade");
+  const topBtn = document.getElementById("topUpdateBtn");
+
+  if (btnCheck) { btnCheck.disabled = true; btnCheck.textContent = "检测中..."; }
+  if (titleEl) titleEl.textContent = "正在连接 GitHub 检测最新版本...";
+  if (btnUp) btnUp.style.display = "none";
+
+  const res = await api("/api/v1/system/check_update");
+  if (btnCheck) { btnCheck.disabled = false; btnCheck.textContent = "🔍 检测更新"; }
+
+  if (!res.success) {
+    if (titleEl) titleEl.textContent = "检测更新失败";
+    if (descEl) descEl.textContent = res.message || "请检查服务器网络连接";
+    showToast(res.message || "检测更新失败", "error");
+    return;
+  }
+
+  const localVer = res.local?.commit || "unknown";
+  const remoteVer = res.remote?.commit || "unknown";
+  const remoteMsg = res.remote?.message ? ` · ${res.remote.message}` : "";
+
+  if (res.has_update) {
+    if (titleEl) titleEl.innerHTML = `<span style="color:var(--warning);">🚀 发现新版本 (${escapeHtml(remoteVer)})</span>`;
+    if (descEl) descEl.textContent = `当前版本: ${localVer} → 最新版本: ${remoteVer}${remoteMsg}`;
+    if (btnUp && res.can_online_upgrade) btnUp.style.display = "inline-flex";
+    if (topBtn) topBtn.textContent = "🚀 有新版本";
+    showToast(`发现新版本 ${remoteVer}，可一键在线更新`);
+  } else {
+    if (titleEl) titleEl.innerHTML = `<span style="color:var(--success);">✅ 当前已是最新版本 (${escapeHtml(localVer)})</span>`;
+    if (descEl) descEl.textContent = res.local?.message ? `最近提交: ${res.local.message} (${res.local.date || ""})` : `本地与远端提交一致 (${remoteVer})`;
+    if (topBtn) topBtn.textContent = "🔍 检测更新";
+    showToast("当前已是最新版本");
+  }
+}
+
+async function triggerSystemUpgrade() {
+  if (!confirm("确认拉取 GitHub 最新版本并重启 Cosmo Firewall？（您的黑名单、白名单与诱捕端口数据将被完整保留）")) return;
+  const btnUp = document.getElementById("btnDoUpgrade");
+  if (btnUp) { btnUp.disabled = true; btnUp.textContent = "更新中..."; }
+
+  const res = await api("/api/v1/system/upgrade", { method: "POST", body: "{}" });
+  if (res.success) {
+    showToast(res.message || "更新成功，页面即将自动刷新...");
+    setTimeout(() => window.location.reload(), 3500);
+  } else {
+    if (btnUp) { btnUp.disabled = false; btnUp.textContent = "⬆️ 一键在线更新"; }
+    showToast(res.message || "在线更新失败", "error");
+  }
+}
+
 // Init
 (async function init() {
   const savedTheme = localStorage.getItem("cosmo_fw_theme") || "dark";

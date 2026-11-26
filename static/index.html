@@ -42,6 +42,7 @@
         <span id="kernelModeBadge" class="badge badge-primary">检测中...</span>
       </div>
       <div class="topbar-right">
+        <button class="btn btn-outline btn-sm" onclick="checkSystemUpdate(true)" id="topUpdateBtn">🔍 检测更新</button>
         <button class="btn btn-outline btn-sm" onclick="toggleTheme()" id="themeBtn">☀️ 浅色</button>
         <button class="btn btn-outline btn-sm" onclick="refreshAll()">🔄 刷新</button>
         <span class="user-pill" id="currentUserLabel">admin</span>
@@ -235,6 +236,21 @@
             </form>
 
             <hr class="divider">
+            <h3 style="margin-bottom:0.75rem; font-size:0.95rem;">🔄 系统版本与在线更新</h3>
+            <div id="updateBox" style="padding:0.85rem 1rem; border-radius:9px; background:var(--bg-input); border:1px solid var(--border); margin-bottom:0.75rem;">
+              <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+                <div>
+                  <div style="font-size:0.86rem; font-weight:600;" id="updateStatusTitle">点击右侧按钮检测 GitHub 最新版本</div>
+                  <div class="muted" id="updateStatusDesc" style="margin-top:0.2rem;">当前版本信息尚未检测</div>
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                  <button type="button" class="btn btn-outline btn-sm" id="btnCheckUpdate" onclick="checkSystemUpdate(false)">🔍 检测更新</button>
+                  <button type="button" class="btn btn-primary btn-sm" id="btnDoUpgrade" style="display:none;" onclick="triggerSystemUpgrade()">⬆️ 一键在线更新</button>
+                </div>
+              </div>
+            </div>
+
+            <hr class="divider">
             <h3 style="margin-bottom:0.75rem; font-size:0.95rem;">🔑 修改管理员密码</h3>
             <form onsubmit="handleChangePassword(event)" class="settings-form">
               <div class="form-row-2">
@@ -354,6 +370,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=1.0"></script>
+  <script src="/app.js?v=1.1"></script>
 </body>
 </html>

@@ -7,6 +7,10 @@ import re
 import sys
 import json
 import time
+import shutil
+import threading
+import subprocess
+import urllib.request
 from urllib.parse import urlparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, Optional
@@ -21,6 +25,173 @@ PORT = int(os.environ.get("PORT", "8090"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 
 FW_ENGINE = engine.FirewallEngine(panel_port=PORT)
+
+
+REPO_HTTPS = "https://github.com/qwernot/Cosmo-Firewall.git"
+REPO_MIRROR = "https://ghfast.top/https://github.com/qwernot/Cosmo-Firewall.git"
+GITHUB_API_COMMIT = "https://api.github.com/repos/qwernot/Cosmo-Firewall/commits/main"
+
+
+def get_local_git_info() -> Dict[str, Any]:
+    info = {
+        "is_git": os.path.isdir(os.path.join(BASE_DIR, ".git")),
+        "commit": "unknown",
+        "full_commit": "",
+        "date": "",
+        "message": "",
+    }
+    if not info["is_git"] or not shutil.which("git"):
+        return info
+    try:
+        r_sha = subprocess.run(
+            ["git", "-C", BASE_DIR, "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3,
+        )
+        if r_sha.returncode == 0 and r_sha.stdout.strip():
+            full = r_sha.stdout.strip()
+            info["full_commit"] = full
+            info["commit"] = full[:7]
+        r_meta = subprocess.run(
+            ["git", "-C", BASE_DIR, "log", "-1", "--format=%ci|%s"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3,
+        )
+        if r_meta.returncode == 0 and "|" in r_meta.stdout:
+            dt, msg = r_meta.stdout.strip().split("|", 1)
+            info["date"] = dt.strip()
+            info["message"] = msg.strip()
+    except Exception:
+        pass
+    return info
+
+
+def check_remote_update() -> Dict[str, Any]:
+    local = get_local_git_info()
+    remote_full = ""
+    remote_date = ""
+    remote_msg = ""
+    err_msg = ""
+
+    # 1. Try GitHub API first (gives commit hash + date + commit message cleanly)
+    try:
+        req = urllib.request.Request(
+            GITHUB_API_COMMIT,
+            headers={"User-Agent": "Cosmo-Firewall-Updater", "Accept": "application/vnd.github.v3+json"},
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+            remote_full = str(data.get("sha") or "").strip()
+            c_obj = data.get("commit") or {}
+            remote_msg = str(c_obj.get("message") or "").splitlines()[0].strip()
+            remote_date = str((c_obj.get("committer") or {}).get("date") or "").replace("T", " ").replace("Z", " UTC")
+    except Exception as e:
+        err_msg = str(e)
+
+    # 2. Fallback to git ls-remote (origin -> mirror)
+    if not remote_full and shutil.which("git"):
+        for target in ("origin", REPO_HTTPS, REPO_MIRROR):
+            try:
+                cmd = ["git", "-C", BASE_DIR, "ls-remote", target, "refs/heads/main"]
+                if target == "origin" and not local["is_git"]:
+                    continue
+                r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=6)
+                if r.returncode == 0 and r.stdout.strip():
+                    remote_full = r.stdout.strip().split()[0]
+                    err_msg = ""
+                    break
+            except Exception:
+                continue
+
+    if not remote_full:
+        return {
+            "success": False,
+            "message": f"无法连接 GitHub 获取最新版本信息（{err_msg or '网络超时'}）",
+            "local": local,
+        }
+
+    has_update = bool(local["full_commit"] and remote_full and not remote_full.startswith(local["full_commit"]))
+    return {
+        "success": True,
+        "has_update": has_update,
+        "can_online_upgrade": local["is_git"],
+        "local": local,
+        "remote": {
+            "commit": remote_full[:7],
+            "full_commit": remote_full,
+            "date": remote_date,
+            "message": remote_msg,
+        },
+        "message": "发现新版本，可一键在线更新" if has_update else "当前已是最新版本",
+    }
+
+
+def perform_online_upgrade() -> Dict[str, Any]:
+    if not os.path.isdir(os.path.join(BASE_DIR, ".git")) or not shutil.which("git"):
+        return {"success": False, "message": "当前目录非 Git 仓库，请使用一键脚本重新安装"}
+
+    fetched = False
+    last_err = ""
+    for remote_target in ("origin", REPO_MIRROR):
+        try:
+            r = subprocess.run(
+                ["git", "-C", BASE_DIR, "fetch", remote_target, "main"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20,
+            )
+            if r.returncode == 0:
+                fetched = True
+                break
+            last_err = (r.stderr or r.stdout or "").strip()
+        except Exception as e:
+            last_err = str(e)
+
+    if not fetched:
+        return {"success": False, "message": f"拉取更新失败：{last_err or '网络异常'}"}
+
+    try:
+        r_rst = subprocess.run(
+            ["git", "-C", BASE_DIR, "reset", "--hard", "FETCH_HEAD"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10,
+        )
+        if r_rst.returncode != 0:
+            return {"success": False, "message": f"应用更新失败：{r_rst.stderr.strip()}"}
+    except Exception as e:
+        return {"success": False, "message": f"应用更新异常：{e}"}
+
+    # Keep scripts executable and refresh global CLI if installed
+    for fn in ("start.sh", "install.sh", "cosmofirewall"):
+        fp = os.path.join(BASE_DIR, fn)
+        if os.path.isfile(fp):
+            try:
+                os.chmod(fp, 0o755)
+            except Exception:
+                pass
+    if database._is_root_linux() and os.path.isfile(os.path.join(BASE_DIR, "cosmofirewall")) and os.path.isfile("/usr/local/bin/cosmofirewall"):
+        try:
+            shutil.copy2(os.path.join(BASE_DIR, "cosmofirewall"), "/usr/local/bin/cosmofirewall")
+        except Exception:
+            pass
+
+    new_info = get_local_git_info()
+    database.record_event("system_upgrade", detail=f"在线升级至版本 {new_info['commit']} ({new_info['message']})")
+
+    def _delayed_restart():
+        time.sleep(1.5)
+        try:
+            if database._is_root_linux() and shutil.which("systemctl"):
+                r_act = subprocess.run(["systemctl", "is-active", "--quiet", "cosmo-firewall"], timeout=2)
+                if r_act.returncode == 0:
+                    subprocess.Popen(["systemctl", "restart", "cosmo-firewall"])
+                    return
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_delayed_restart, daemon=True).start()
+    return {
+        "success": True,
+        "message": f"已成功更新至版本 {new_info['commit']}，服务正在重启...",
+        "new_commit": new_info["commit"],
+    }
 
 
 def get_client_ip(handler: SimpleHTTPRequestHandler) -> str:
@@ -177,6 +348,12 @@ class FirewallHandler(SimpleHTTPRequestHandler):
             if not self.require_auth():
                 return
             self.send_json({"success": True, "events": database.list_events(limit=100)})
+            return
+
+        if path == "/api/v1/system/check_update":
+            if not self.require_auth():
+                return
+            self.send_json(check_remote_update())
             return
 
         if path in ("", "/", "/login", "/dashboard"):
@@ -349,6 +526,11 @@ class FirewallHandler(SimpleHTTPRequestHandler):
                     database.set_setting(k, str(v))
             FW_ENGINE.sync_trap_sockets()
             self.send_json({"success": True, "message": "防护策略已保存并即时生效", "settings": database.get_all_settings()})
+            return
+
+        if path == "/api/v1/system/upgrade":
+            res = perform_online_upgrade()
+            self.send_json(res, 200 if res.get("success") else 400)
             return
 
         self.send_json({"success": False, "message": "未知接口路径"}, 404)

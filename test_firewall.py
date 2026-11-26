@@ -143,6 +143,13 @@ class TestCosmoFirewall(unittest.TestCase):
         # Dual-stack IPv4-mapped socket parsing
         self.assertEqual(database.normalize_ip("[::ffff:36.57.16.123]:9593"), "36.57.16.123")
 
+    def test_05_local_git_info_and_update_endpoint(self):
+        info = server.get_local_git_info()
+        self.assertTrue(info["is_git"])
+        self.assertEqual(len(info["commit"]), 7)
+        st, _ = self._req("/api/v1/system/check_update")
+        self.assertEqual(st, 401)
+
 
 if __name__ == "__main__":
     unittest.main()

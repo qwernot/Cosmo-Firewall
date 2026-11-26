@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cosmo Firewall · 全端口智能防扫描与内核防火墙</title>
+  <link rel="stylesheet" href="/style.css?v=1.0">
+</head>
+<body>
+  <div id="toastContainer" class="toast-container"></div>
+
+  <!-- LOGIN VIEW -->
+  <div id="loginView" class="login-wrap">
+    <div class="login-card">
+      <div class="brand-head">
+        <div class="brand-icon">🛡️</div>
+        <div>
+          <h1>Cosmo Firewall</h1>
+          <p>全端口（1–65535）智能防扫描 · Linux 内核 ipset 防火墙</p>
+        </div>
+      </div>
+      <form onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label for="loginUser">管理员账号</label>
+          <input id="loginUser" type="text" placeholder="dark" value="dark" required autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="loginPass">登录密码</label>
+          <input id="loginPass" type="password" placeholder="请输入密码" required autocomplete="current-password">
+        </div>
+        <button class="btn btn-primary btn-block" type="submit">登录防火墙控制台</button>
+      </form>
+      <div class="login-foot">默认测试账号：<code>dark</code> / <code>Aa666333</code>（登录后可随时修改）</div>
+    </div>
+  </div>
+
+  <!-- DASHBOARD VIEW -->
+  <div id="appView" class="app-shell" style="display:none;">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="brand-logo">🛡️</span>
+        <span class="brand-name">Cosmo Firewall</span>
+        <span id="kernelModeBadge" class="badge badge-primary">检测中...</span>
+      </div>
+      <div class="topbar-right">
+        <button class="btn btn-outline btn-sm" onclick="toggleTheme()" id="themeBtn">☀️ 浅色</button>
+        <button class="btn btn-outline btn-sm" onclick="refreshAll()">🔄 刷新</button>
+        <span class="user-pill" id="currentUserLabel">dark</span>
+        <button class="btn btn-outline btn-sm" onclick="handleLogout()">退出</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <!-- KPI Row -->
+      <section class="kpi-grid">
+        <div class="card kpi-card">
+          <div>
+            <div class="kpi-label">当前封禁 IP 总数</div>
+            <div class="kpi-value danger" id="statTotalBans">0</div>
+            <div class="kpi-sub">自动拦截 <span id="statAutoBans">0</span> · 手动 <span id="statManualBans">0</span></div>
+          </div>
+          <div class="kpi-ico danger">🚫</div>
+        </div>
+        <div class="card kpi-card">
+          <div>
+            <div class="kpi-label">白名单保护条目</div>
+            <div class="kpi-value success" id="statWhitelist">0</div>
+            <div class="kpi-sub">支持单 IP 与 CIDR 网段永久豁免</div>
+          </div>
+          <div class="kpi-ico success">✅</div>
+        </div>
+        <div class="card kpi-card">
+          <div>
+            <div class="kpi-label">运行中诱捕哨兵端口</div>
+            <div class="kpi-value primary" id="statTraps">0 / 0</div>
+            <div class="kpi-sub">累计捕获扫描触碰 <span id="statTrapHits">0</span> 次</div>
+          </div>
+          <div class="kpi-ico primary">🎯</div>
+        </div>
+        <div class="card kpi-card">
+          <div>
+            <div class="kpi-label">全端口防御状态</div>
+            <div class="kpi-value" id="statDefenseStatus" style="color:var(--success);">运行中</div>
+            <div class="kpi-sub">内核拦截数据包：<span id="statDroppedPkts">0</span></div>
+          </div>
+          <div class="kpi-ico warning">⚡</div>
+        </div>
+      </section>
+
+      <!-- Tabs -->
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="blacklist" onclick="switchTab('blacklist')">🛡️ IP 黑名单</button>
+        <button class="tab-btn" data-tab="whitelist" onclick="switchTab('whitelist')">✅ IP 白名单</button>
+        <button class="tab-btn" data-tab="traps" onclick="switchTab('traps')">🎯 探测诱捕端口</button>
+        <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ 防护策略与日志</button>
+      </nav>
+
+      <!-- TAB 1: BLACKLIST -->
+      <section id="tab-blacklist" class="tab-pane active">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>全服 IP 访问黑名单与自动防扫描拦截</h2>
+              <p class="muted">全端口（1–65535）哨兵诱捕 + 内核 conntrack 横向扫段 + SSHD / Web 漏洞探测 + Linux 内核 ipset 毫秒级丢包。</p>
+            </div>
+            <div class="toolbar">
+              <button class="btn btn-primary btn-sm" onclick="openModal('addBlacklistModal')">➕ 添加封禁 IP</button>
+              <button class="btn btn-outline btn-sm" onclick="syncKernelFirewall()">🔄 强制同步内核</button>
+              <button class="btn btn-outline btn-sm danger-text" onclick="clearAutoBans()">🧹 清空自动拦截</button>
+              <input type="text" id="blacklistSearch" class="search-input" placeholder="搜索 IP 或原因..." oninput="renderBlacklist()">
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:60px;">ID</th>
+                  <th>IP 地址</th>
+                  <th>封禁来源</th>
+                  <th>拦截封禁原因</th>
+                  <th>封禁时间</th>
+                  <th>到期时间 / 状态</th>
+                  <th style="width:96px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="blacklistTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: WHITELIST -->
+      <section id="tab-whitelist" class="tab-pane">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>IP 与网段白名单（最高放行优先级）</h2>
+              <p class="muted">加入白名单的 IP / CIDR 网段永远不会被自动防扫描封禁；若此前在黑名单中会自动解除，并在内核 iptables 中置于 DROP 之前优先放行。</p>
+            </div>
+            <div class="toolbar">
+              <button class="btn btn-primary btn-sm" onclick="openModal('addWhitelistModal')">➕ 添加白名单</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:60px;">ID</th>
+                  <th>白名单 IP / CIDR 网段</th>
+                  <th>备注说明</th>
+                  <th>添加时间</th>
+                  <th style="width:96px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="whitelistTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 3: TRAP PORTS -->
+      <section id="tab-traps" class="tab-pane">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>全端口哨兵诱捕探测端口配置</h2>
+              <p class="muted">在未占用的低位/业务/高位端口上监听轻量诱捕套接字；若某端口已被本机服务占用会自动跳过，绝不冲突。扫描器一旦触碰立即拉黑。</p>
+            </div>
+            <div class="toolbar">
+              <button class="btn btn-primary btn-sm" onclick="openModal('addTrapModal')">➕ 添加探测端口</button>
+              <button class="btn btn-outline btn-sm" onclick="syncKernelFirewall()">🔄 立即重检端口</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:90px;">端口号</th>
+                  <th>用途备注</th>
+                  <th>实时监听状态</th>
+                  <th>捕获扫描次数</th>
+                  <th>最近触碰时间</th>
+                  <th style="width:160px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="trapsTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 4: SETTINGS & LOGS -->
+      <section id="tab-settings" class="tab-pane">
+        <div class="two-col">
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2>⚙️ 防扫描策略配置</h2>
+                <p class="muted">修改保存后即时生效，无需重启服务。</p>
+              </div>
+            </div>
+            <form onsubmit="saveSettings(event)" class="settings-form">
+              <div class="switch-row">
+                <label><input type="checkbox" id="setEnabled"> 启用整机自动防扫描总开关</label>
+              </div>
+              <div class="switch-row">
+                <label><input type="checkbox" id="setFullPort"> 开启全端口（1–65535）内核 conntrack 扫段监控</label>
+              </div>
+              <div class="switch-row">
+                <label><input type="checkbox" id="setSshd"> 开启宿主机 SSHD（22端口）防爆破监控</label>
+              </div>
+              <div class="switch-row">
+                <label><input type="checkbox" id="setWeb"> 开启 Nginx / Docker NPM 漏洞扫描监控</label>
+              </div>
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="setThreshold">异常触发阈值（评分）</label>
+                  <input id="setThreshold" type="number" min="2" max="50" required>
+                </div>
+                <div class="form-group">
+                  <label for="setWindow">统计窗口（秒）</label>
+                  <input id="setWindow" type="number" min="30" max="86400" required>
+                </div>
+              </div>
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="setBanDuration">自动封禁时长（秒，86400=24小时）</label>
+                  <input id="setBanDuration" type="number" min="60" max="31536000" required>
+                </div>
+                <div class="form-group">
+                  <label for="setTrustedPorts">在线会话免误封服务端口（逗号分隔）</label>
+                  <input id="setTrustedPorts" type="text" placeholder="22,7000,7001,8024">
+                </div>
+              </div>
+              <button type="submit" class="btn btn-primary">💾 保存防扫描策略</button>
+            </form>
+
+            <hr class="divider">
+            <h3 style="margin-bottom:0.75rem; font-size:0.95rem;">🔑 修改管理员密码</h3>
+            <form onsubmit="handleChangePassword(event)" class="settings-form">
+              <div class="form-row-2">
+                <div class="form-group">
+                  <label for="oldPwd">原密码</label>
+                  <input id="oldPwd" type="password" required>
+                </div>
+                <div class="form-group">
+                  <label for="newPwd">新密码（至少6位）</label>
+                  <input id="newPwd" type="password" minlength="6" required>
+                </div>
+              </div>
+              <button type="submit" class="btn btn-outline btn-sm">更新密码</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div>
+                <h2>📜 实时安全审计日志</h2>
+                <p class="muted">展示最近 100 条诱捕、封禁、解封与白名单变更记录。</p>
+              </div>
+              <button class="btn btn-outline btn-sm" onclick="loadEvents()">刷新日志</button>
+            </div>
+            <div class="event-list" id="eventList"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- MODAL: ADD BLACKLIST -->
+  <div class="modal-overlay" id="addBlacklistModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>➕ 添加封禁 IP</h3>
+        <button class="close-btn" onclick="closeModal('addBlacklistModal')">&times;</button>
+      </div>
+      <form onsubmit="submitAddBlacklist(event)">
+        <div class="form-group">
+          <label for="blIpInput">IP 地址（支持多 IP 换行或逗号批量输入）</label>
+          <textarea id="blIpInput" rows="3" placeholder="例如：&#10;1.2.3.4&#10;5.6.7.8" required></textarea>
+        </div>
+        <div class="form-group">
+          <label for="blReasonInput">封禁原因</label>
+          <input id="blReasonInput" type="text" value="管理员手动封禁">
+        </div>
+        <div class="form-group">
+          <label for="blDurationInput">封禁时长</label>
+          <select id="blDurationInput">
+            <option value="3600">1 小时</option>
+            <option value="86400" selected>24 小时</option>
+            <option value="604800">7 天</option>
+            <option value="2592000">30 天</option>
+            <option value="0">永久封禁</option>
+          </select>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-outline" onclick="closeModal('addBlacklistModal')">取消</button>
+          <button type="submit" class="btn btn-primary">确认封禁</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: ADD WHITELIST -->
+  <div class="modal-overlay" id="addWhitelistModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>✅ 添加 IP / CIDR 白名单</h3>
+        <button class="close-btn" onclick="closeModal('addWhitelistModal')">&times;</button>
+      </div>
+      <form onsubmit="submitAddWhitelist(event)">
+        <div class="form-group">
+          <label for="wlEntryInput">IP 或 CIDR 网段（支持换行/逗号批量输入）</label>
+          <textarea id="wlEntryInput" rows="3" placeholder="例如：&#10;114.114.114.114&#10;192.168.10.0/24" required></textarea>
+        </div>
+        <div class="form-group">
+          <label for="wlNoteInput">备注说明</label>
+          <input id="wlNoteInput" type="text" placeholder="例如：公司固定出口 IP / 办公室网络">
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-outline" onclick="closeModal('addWhitelistModal')">取消</button>
+          <button type="submit" class="btn btn-primary">加入白名单</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- MODAL: ADD TRAP PORT -->
+  <div class="modal-overlay" id="addTrapModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3>🎯 添加哨兵诱捕探测端口</h3>
+        <button class="close-btn" onclick="closeModal('addTrapModal')">&times;</button>
+      </div>
+      <form onsubmit="submitAddTrap(event)">
+        <div class="form-group">
+          <label for="trapPortInput">端口号（支持单个或逗号/空格批量输入，1–65535）</label>
+          <input id="trapPortInput" type="text" placeholder="例如：1433, 3306, 6379, 27017" required>
+        </div>
+        <div class="form-group">
+          <label for="trapNoteInput">用途备注</label>
+          <input id="trapNoteInput" type="text" placeholder="例如：数据库常用扫描诱捕端口">
+        </div>
+        <div class="preset-row">
+          <span class="muted" style="font-size:0.78rem;">快捷填充：</span>
+          <button type="button" class="chip-btn" onclick="fillTrapPreset('1433, 3306, 6379, 27017', '数据库高频扫描诱捕')">数据库四件套</button>
+          <button type="button" class="chip-btn" onclick="fillTrapPreset('23, 445, 3389, 5900', '远程管理高危诱捕')">远程控制四件套</button>
+          <button type="button" class="chip-btn" onclick="fillTrapPreset('8888, 9000, 18888, 28888', '中位扫描哨兵')">中位哨兵</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-outline" onclick="closeModal('addTrapModal')">取消</button>
+          <button type="submit" class="btn btn-primary">保存并立即监听</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js?v=1.0"></script>
+</body>
+</html>

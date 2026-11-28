@@ -7,13 +7,15 @@ import re
 import sys
 import json
 import time
+import random
+import secrets
 import shutil
 import threading
 import subprocess
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import database
 import engine
@@ -25,6 +27,35 @@ PORT = int(os.environ.get("PORT", "8090"))
 HOST = os.environ.get("HOST", "0.0.0.0")
 
 FW_ENGINE = engine.FirewallEngine(panel_port=PORT)
+
+# Short-lived math challenges for public self-service /unban portal: token -> (answer, expire_ts)
+_UNBAN_CHALLENGES: Dict[str, Tuple[int, float]] = {}
+_CHALLENGE_LOCK = threading.Lock()
+
+
+def create_unban_challenge() -> Dict[str, str]:
+    a = random.randint(3, 19)
+    b = random.randint(2, 15)
+    ans = a + b
+    cid = secrets.token_urlsafe(12)
+    now = time.time()
+    with _CHALLENGE_LOCK:
+        for k in [x for x, (_, exp) in _UNBAN_CHALLENGES.items() if exp < now]:
+            _UNBAN_CHALLENGES.pop(k, None)
+        _UNBAN_CHALLENGES[cid] = (ans, now + 300)
+    return {"challenge_id": cid, "question": f"{a} + {b} = ?"}
+
+
+def verify_unban_challenge(cid: str, user_answer: str) -> bool:
+    if not cid or not str(user_answer).strip().lstrip("-").isdigit():
+        return False
+    now = time.time()
+    with _CHALLENGE_LOCK:
+        item = _UNBAN_CHALLENGES.pop(cid, None)
+    if not item:
+        return False
+    ans, exp = item
+    return exp >= now and int(str(user_answer).strip()) == ans
 
 
 REPO_HTTPS = "https://github.com/qwernot/Cosmo-Firewall.git"
@@ -260,8 +291,11 @@ class FirewallHandler(SimpleHTTPRequestHandler):
         if FW_ENGINE.inspect_panel_request(cip, getattr(self, "command", "GET"), path):
             self.send_json({"success": False, "message": "Forbidden"}, 403)
             return False
+        # Allow public self-service /unban portal even for blacklisted IPs so misbanned users can appeal & auto-unban
+        if path in ("/unban", "/unban.html", "/style.css", "/api/v1/public/unban/status", "/api/v1/public/unban/apply"):
+            return True
         if database.is_ip_blacklisted(cip):
-            self.send_json({"success": False, "message": "IP 已被防火墙拦截"}, 403)
+            self.send_json({"success": False, "message": "您的 IP 已被防火墙拦截，可访问 /unban 申请自助解封"}, 403)
             return False
         return True
 
@@ -279,6 +313,43 @@ class FirewallHandler(SimpleHTTPRequestHandler):
         if path == "/api/v1/health":
             self.send_json({"success": True, "service": "Cosmo Firewall", "ts": int(time.time())})
             return
+
+        if path == "/api/v1/public/unban/status":
+            qs = parse_qs(parsed.query)
+            req_ip = (qs.get("ip", [""])[0] or "").strip()
+            cip = get_client_ip(self)
+            target_ip = database.normalize_ip(req_ip) if req_ip else database.normalize_ip(cip)
+            entry = database.get_blacklist_entry(target_ip) if target_ip else None
+            auto_enabled = database.get_setting("auto_unban_enabled", "1") == "1"
+            daily_limit = max(1, int(database.get_setting("auto_unban_daily_limit", "2") or "2"))
+            used_today = database.count_recent_auto_unbans(target_ip, hours=24) if target_ip else 0
+            can_auto = bool(
+                entry
+                and auto_enabled
+                and entry.get("source") in ("auto_scan", "brute_force")
+                and used_today < daily_limit
+            )
+            self.send_json({
+                "success": True,
+                "client_ip": database.normalize_ip(cip) or cip,
+                "target_ip": target_ip or "",
+                "is_banned": bool(entry),
+                "ban_info": entry,
+                "can_auto_unban": can_auto,
+                "auto_unban_remaining_quota": max(0, daily_limit - used_today),
+                "challenge": create_unban_challenge(),
+            })
+            return
+
+        if path == "/api/v1/unban_requests":
+            if not self.require_auth():
+                return
+            self.send_json({"success": True, "requests": database.list_unban_requests(limit=100)})
+            return
+
+        if path == "/unban":
+            self.path = "/unban.html"
+            return super().do_GET()
 
         if path == "/api/v1/auth/me":
             user = self.require_auth()
@@ -368,6 +439,51 @@ class FirewallHandler(SimpleHTTPRequestHandler):
 
         body = self.read_json_body()
         cip = get_client_ip(self)
+
+        # Public self-service unban application
+        if path == "/api/v1/public/unban/apply":
+            cid = str(body.get("challenge_id") or "").strip()
+            ans = str(body.get("answer") or "").strip()
+            if not verify_unban_challenge(cid, ans):
+                self.send_json({"success": False, "message": "验证码计算错误或已过期，请刷新后重试", "challenge": create_unban_challenge()}, 400)
+                return
+            raw_ip = str(body.get("ip") or "").strip()
+            target_ip = database.normalize_ip(raw_ip) if raw_ip else database.normalize_ip(cip)
+            reason = str(body.get("reason") or "用户自助申诉解封").strip() or "用户自助申诉解封"
+            if not target_ip:
+                self.send_json({"success": False, "message": "请输入有效的 IP 地址"}, 400)
+                return
+            entry = database.get_blacklist_entry(target_ip)
+            if not entry:
+                self.send_json({"success": True, "auto_unbanned": False, "message": f"IP {target_ip} 当前未被封禁，可直接正常访问"})
+                return
+
+            auto_enabled = database.get_setting("auto_unban_enabled", "1") == "1"
+            daily_limit = max(1, int(database.get_setting("auto_unban_daily_limit", "2") or "2"))
+            used_today = database.count_recent_auto_unbans(target_ip, hours=24)
+
+            if auto_enabled and entry.get("source") in ("auto_scan", "brute_force") and used_today < daily_limit:
+                database.remove_blacklist_ip(target_ip)
+                FW_ENGINE.recently_banned.pop(target_ip, None)
+                FW_ENGINE.mark_trusted_ip(target_ip, ttl=1800)
+                database.create_unban_request(target_ip, cip, reason, status="auto_approved")
+                database.record_event("unban", ip=target_ip, detail=f"用户通过自助验证自动解封 ({reason})")
+                self.send_json({
+                    "success": True,
+                    "auto_unbanned": True,
+                    "message": f"✅ 验证通过！IP {target_ip} 已自动解除封禁并同步内核防火墙（30 分钟内免重复误封）",
+                })
+                return
+
+            database.create_unban_request(target_ip, cip, reason, status="pending")
+            database.record_event("unban_appeal", ip=target_ip, detail=f"提交人工解封申诉: {reason}")
+            tip = "该 IP 为管理员手动封禁" if entry.get("source") == "manual" else "今日自助解封次数已达上限"
+            self.send_json({
+                "success": True,
+                "auto_unbanned": False,
+                "message": f"已提交人工审核申请（{tip}），请等待管理员在后台审批",
+            })
+            return
 
         # Login
         if path == "/api/v1/auth/login":
@@ -531,6 +647,19 @@ class FirewallHandler(SimpleHTTPRequestHandler):
         if path == "/api/v1/system/upgrade":
             res = perform_online_upgrade()
             self.send_json(res, 200 if res.get("success") else 400)
+            return
+
+        if path == "/api/v1/unban_requests/approve":
+            ok, msg, ip_val = database.handle_unban_request(int(body.get("id") or 0), approve=True)
+            if ok and ip_val:
+                FW_ENGINE.recently_banned.pop(ip_val, None)
+                FW_ENGINE.mark_trusted_ip(ip_val, ttl=3600)
+            self.send_json({"success": ok, "message": msg}, 200 if ok else 400)
+            return
+
+        if path == "/api/v1/unban_requests/reject":
+            ok, msg, _ = database.handle_unban_request(int(body.get("id") or 0), approve=False)
+            self.send_json({"success": ok, "message": msg}, 200 if ok else 400)
             return
 
         self.send_json({"success": False, "message": "未知接口路径"}, 404)

@@ -150,6 +150,51 @@ class TestCosmoFirewall(unittest.TestCase):
         st, _ = self._req("/api/v1/system/check_update")
         self.assertEqual(st, 401)
 
+    def test_06_self_service_unban_portal(self):
+        # 1. Auto-banned IP can self-unban after solving math challenge
+        database.add_blacklist_ip("198.51.100.88", reason="测试自动误封", source="auto_scan", expire_seconds=3600)
+        st, info = self._req("/api/v1/public/unban/status?ip=198.51.100.88")
+        self.assertEqual(st, 200)
+        self.assertTrue(info["is_banned"])
+        self.assertTrue(info["can_auto_unban"])
+        cid = info["challenge"]["challenge_id"]
+        q = info["challenge"]["question"]  # e.g. "12 + 5 = ?"
+        a, b = [int(x.strip()) for x in q.split("=")[0].split("+")]
+
+        st2, res2 = self._req("/api/v1/public/unban/apply", "POST", {
+            "ip": "198.51.100.88",
+            "reason": "正常访问误封",
+            "challenge_id": cid,
+            "answer": str(a + b),
+        })
+        self.assertEqual(st2, 200)
+        self.assertTrue(res2["auto_unbanned"])
+        self.assertFalse(database.is_ip_blacklisted("198.51.100.88"))
+
+        # 2. Manually banned IP cannot auto-unban -> becomes pending admin review
+        database.add_blacklist_ip("198.51.100.89", reason="管理员手动封禁", source="manual", expire_seconds=0)
+        _, info_m = self._req("/api/v1/public/unban/status?ip=198.51.100.89")
+        self.assertFalse(info_m["can_auto_unban"])
+        cid_m = info_m["challenge"]["challenge_id"]
+        am, bm = [int(x.strip()) for x in info_m["challenge"]["question"].split("=")[0].split("+")]
+        st3, res3 = self._req("/api/v1/public/unban/apply", "POST", {
+            "ip": "198.51.100.89",
+            "reason": "申请解封",
+            "challenge_id": cid_m,
+            "answer": str(am + bm),
+        })
+        self.assertEqual(st3, 200)
+        self.assertFalse(res3["auto_unbanned"])
+        self.assertTrue(database.is_ip_blacklisted("198.51.100.89"))
+
+        # Admin approves pending appeal
+        _, reqs = self._req("/api/v1/unban_requests", token=self.token)
+        pending = [r for r in reqs["requests"] if r["ip"] == "198.51.100.89" and r["status"] == "pending"]
+        self.assertTrue(len(pending) >= 1)
+        st4, _ = self._req("/api/v1/unban_requests/approve", "POST", {"id": pending[0]["id"]}, token=self.token)
+        self.assertEqual(st4, 200)
+        self.assertFalse(database.is_ip_blacklisted("198.51.100.89"))
+
 
 if __name__ == "__main__":
     unittest.main()

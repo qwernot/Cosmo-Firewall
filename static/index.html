@@ -92,6 +92,7 @@
         <button class="tab-btn active" data-tab="blacklist" onclick="switchTab('blacklist')">🛡️ IP 黑名单</button>
         <button class="tab-btn" data-tab="whitelist" onclick="switchTab('whitelist')">✅ IP 白名单</button>
         <button class="tab-btn" data-tab="traps" onclick="switchTab('traps')">🎯 探测诱捕端口</button>
+        <button class="tab-btn" data-tab="unban" onclick="switchTab('unban')">🔓 解封申诉</button>
         <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">⚙️ 防护策略与日志</button>
       </nav>
 
@@ -189,7 +190,38 @@
         </div>
       </section>
 
-      <!-- TAB 4: SETTINGS & LOGS -->
+      <!-- TAB 4: UNBAN REQUESTS -->
+      <section id="tab-unban" class="tab-pane">
+        <div class="card">
+          <div class="card-header">
+            <div>
+              <h2>🔓 用户自助解封与人工申诉记录</h2>
+              <p class="muted">用户可访问公开页面 <a href="/unban" target="_blank" style="color:var(--primary); font-weight:600;">/unban</a> 查询封禁原因并完成人机验证自动解封（自动拦截默认每日最多自助解封 2 次；手动封禁进入人工审批）。</p>
+            </div>
+            <div class="toolbar">
+              <a class="btn btn-outline btn-sm" href="/unban" target="_blank">🔗 打开用户解封门户</a>
+              <button class="btn btn-outline btn-sm" onclick="loadUnbanRequests()">🔄 刷新记录</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="width:60px;">ID</th>
+                  <th>申诉 IP</th>
+                  <th>申诉说明</th>
+                  <th>处理状态</th>
+                  <th>提交时间</th>
+                  <th style="width:150px;">操作</th>
+                </tr>
+              </thead>
+              <tbody id="unbanTbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 5: SETTINGS & LOGS -->
       <section id="tab-settings" class="tab-pane">
         <div class="two-col">
           <div class="card">
@@ -211,6 +243,9 @@
               </div>
               <div class="switch-row">
                 <label><input type="checkbox" id="setWeb"> 开启 Nginx / Docker NPM 漏洞扫描监控</label>
+              </div>
+              <div class="switch-row">
+                <label><input type="checkbox" id="setAutoUnban"> 允许被自动误封的用户在 /unban 通过验证后自动解封</label>
               </div>
               <div class="form-row-2">
                 <div class="form-group">
@@ -370,6 +405,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=1.1"></script>
+  <script src="/app.js?v=1.2"></script>
 </body>
 </html>

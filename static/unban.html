@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IP 自助申诉与自动解封 · Cosmo Firewall</title>
+  <link rel="stylesheet" href="/style.css?v=1.2">
+  <style>
+    .unban-shell { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 1.25rem; background: radial-gradient(circle at 20% 20%, rgba(99,102,241,0.16), transparent 45%), var(--bg); }
+    .unban-card { width: 100%; max-width: 500px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 16px; padding: 1.75rem; box-shadow: 0 24px 50px rgba(0,0,0,0.35); }
+    .status-box { padding: 0.9rem 1rem; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-input); margin-bottom: 1.15rem; font-size: 0.86rem; }
+    .status-box.banned { border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.08); }
+    .status-box.ok { border-color: rgba(16,185,129,0.4); background: rgba(16,185,129,0.08); }
+    .challenge-row { display: flex; align-items: center; gap: 0.6rem; }
+    .challenge-q { padding: 0.5rem 0.85rem; border-radius: 8px; background: var(--primary-bg); color: var(--primary); font-family: monospace; font-weight: 700; font-size: 0.95rem; white-space: nowrap; border: 1px solid rgba(99,102,241,0.3); }
+    .result-banner { margin-top: 1rem; padding: 0.8rem 1rem; border-radius: 9px; font-size: 0.85rem; display: none; }
+    .result-banner.success { display: block; background: var(--success-bg); color: var(--success); border: 1px solid rgba(16,185,129,0.35); }
+    .result-banner.error { display: block; background: var(--danger-bg); color: var(--danger); border: 1px solid rgba(239,68,68,0.35); }
+  </style>
+</head>
+<body>
+  <div class="unban-shell">
+    <div class="unban-card">
+      <div class="brand-head" style="margin-bottom:1.25rem;">
+        <div class="brand-icon">🔓</div>
+        <div>
+          <h1>IP 自助解封申诉</h1>
+          <p>Cosmo Firewall · 误拦截自动核验解封通道</p>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label for="queryIpInput">查询或申诉的公网 IP（默认自动识别您当前 IP，也可手动填写）</label>
+        <div style="display:flex; gap:0.5rem;">
+          <input id="queryIpInput" type="text" placeholder="留空自动识别当前访问 IP">
+          <button type="button" class="btn btn-outline btn-sm" onclick="checkStatus()" style="white-space:nowrap;">查询状态</button>
+        </div>
+      </div>
+
+      <div id="statusBox" class="status-box">正在检测您的 IP 状态...</div>
+
+      <form id="unbanForm" onsubmit="submitUnban(event)" style="display:none;">
+        <div class="form-group">
+          <label for="appealReason">申诉说明（选填）</label>
+          <input id="appealReason" type="text" placeholder="例如：正常访问网站或内网穿透被误拦截">
+        </div>
+        <div class="form-group">
+          <label for="challengeAnswer">人机验证（输入下方算式结果）</label>
+          <div class="challenge-row">
+            <span id="challengeQuestion" class="challenge-q">...</span>
+            <input id="challengeAnswer" type="number" placeholder="输入计算结果" required>
+            <button type="button" class="btn btn-outline btn-sm" onclick="checkStatus()" title="换一题">🔄</button>
+          </div>
+        </div>
+        <button id="submitBtn" type="submit" class="btn btn-primary btn-block">验证并申请解封</button>
+      </form>
+
+      <div id="resultBanner" class="result-banner"></div>
+    </div>
+  </div>
+
+  <script>
+    let currentChallengeId = "";
+    let currentTargetIp = "";
+
+    function esc(s) {
+      return String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    async function checkStatus() {
+      const ipVal = (document.getElementById("queryIpInput").value || "").trim();
+      const box = document.getElementById("statusBox");
+      const form = document.getElementById("unbanForm");
+      const banner = document.getElementById("resultBanner");
+      banner.className = "result-banner";
+      banner.textContent = "";
+
+      const url = ipVal ? `/api/v1/public/unban/status?ip=${encodeURIComponent(ipVal)}` : "/api/v1/public/unban/status";
+      const resp = await fetch(url);
+      const data = await resp.json().catch(() => ({ success: false }));
+      if (!data.success) {
+        box.className = "status-box banned";
+        box.textContent = "无法查询 IP 状态，请稍后重试。";
+        form.style.display = "none";
+        return;
+      }
+
+      currentTargetIp = data.target_ip || data.client_ip || "";
+      if (!ipVal && currentTargetIp) {
+        document.getElementById("queryIpInput").value = currentTargetIp;
+      }
+      if (data.challenge) {
+        currentChallengeId = data.challenge.challenge_id;
+        document.getElementById("challengeQuestion").textContent = data.challenge.question;
+        document.getElementById("challengeAnswer").value = "";
+      }
+
+      if (!data.is_banned) {
+        box.className = "status-box ok";
+        box.innerHTML = `<strong>✅ IP <code>${esc(currentTargetIp)}</code> 当前状态正常</strong><div class="muted" style="margin-top:0.25rem;">该 IP 不在黑名单中，可直接正常访问所有服务。</div>`;
+        form.style.display = "none";
+      } else {
+        const b = data.ban_info || {};
+        const modeTip = data.can_auto_unban
+          ? `<span style="color:var(--success); font-weight:600;">支持验证后立即自动解封（今日剩余 ${data.auto_unban_remaining_quota} 次）</span>`
+          : `<span style="color:var(--warning); font-weight:600;">需提交管理员人工审核解封</span>`;
+        box.className = "status-box banned";
+        box.innerHTML = `
+          <div><strong>🚫 IP <code>${esc(currentTargetIp)}</code> 当前处于封禁状态</strong></div>
+          <div class="muted" style="margin-top:0.35rem;">拦截原因：${esc(b.reason || "异常访问触发防御")}</div>
+          <div style="margin-top:0.35rem; font-size:0.8rem;">处理方式：${modeTip}</div>
+        `;
+        document.getElementById("submitBtn").textContent = data.can_auto_unban ? "验证并立即自动解封" : "提交人工解封申请";
+        form.style.display = "block";
+      }
+    }
+
+    async function submitUnban(e) {
+      e.preventDefault();
+      const btn = document.getElementById("submitBtn");
+      const banner = document.getElementById("resultBanner");
+      btn.disabled = true;
+      const resp = await fetch("/api/v1/public/unban/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ip: document.getElementById("queryIpInput").value.trim(),
+          reason: document.getElementById("appealReason").value.trim(),
+          challenge_id: currentChallengeId,
+          answer: document.getElementById("challengeAnswer").value.trim(),
+        }),
+      });
+      const data = await resp.json().catch(() => ({ success: false, message: "请求异常" }));
+      btn.disabled = false;
+
+      if (data.success) {
+        banner.className = "result-banner success";
+        banner.textContent = data.message;
+        if (data.auto_unbanned) {
+          setTimeout(checkStatus, 1200);
+        }
+      } else {
+        banner.className = "result-banner error";
+        banner.textContent = data.message || "验证失败";
+        if (data.challenge) {
+          currentChallengeId = data.challenge.challenge_id;
+          document.getElementById("challengeQuestion").textContent = data.challenge.question;
+          document.getElementById("challengeAnswer").value = "";
+        }
+      }
+    }
+
+    checkStatus();
+  </script>
+</body>
+</html>

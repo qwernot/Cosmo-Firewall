@@ -64,6 +64,8 @@ DEFAULT_SETTINGS = {
     "web_monitor": "1",
     "trusted_service_ports": "22,7000,7001,8024",
     "auto_trust_ttl": "7200",
+    "auto_unban_enabled": "1",
+    "auto_unban_daily_limit": "2",
 }
 
 
@@ -238,6 +240,15 @@ def init_db():
                     port INTEGER NOT NULL DEFAULT 0,
                     detail TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS unban_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ip TEXT NOT NULL,
+                    applicant_ip TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at INTEGER NOT NULL,
+                    handled_at INTEGER NOT NULL DEFAULT 0
                 );
                 """
             )
@@ -514,6 +525,88 @@ def is_ip_blacklisted(raw_ip: str) -> bool:
         conn.close()
 
 
+def get_blacklist_entry(raw_ip: str) -> Optional[Dict[str, Any]]:
+    clean = normalize_ip(raw_ip)
+    if not clean:
+        return None
+    now = int(time.time())
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM ip_blacklist WHERE ip = ?;", (clean,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if d["expire_at"] > 0 and d["expire_at"] <= now:
+            return None
+        d["remaining_seconds"] = max(0, d["expire_at"] - now) if d["expire_at"] > 0 else 0
+        return d
+    finally:
+        conn.close()
+
+
+def count_recent_auto_unbans(raw_ip: str, hours: int = 24) -> int:
+    clean = normalize_ip(raw_ip)
+    if not clean:
+        return 0
+    since = int(time.time()) - hours * 3600
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM unban_requests WHERE ip = ? AND status = 'auto_approved' AND created_at >= ?;",
+            (clean, since),
+        ).fetchone()
+        return int(row["c"]) if row else 0
+    finally:
+        conn.close()
+
+
+def create_unban_request(raw_ip: str, applicant_ip: str, reason: str, status: str = "pending") -> Dict[str, Any]:
+    clean = normalize_ip(raw_ip) or str(raw_ip).strip()
+    now = int(time.time())
+    handled = now if status in ("auto_approved", "approved", "rejected") else 0
+    with _DB_LOCK:
+        conn = get_conn()
+        try:
+            cur = conn.execute(
+                "INSERT INTO unban_requests (ip, applicant_ip, reason, status, created_at, handled_at) VALUES (?, ?, ?, ?, ?, ?);",
+                (clean, applicant_ip, (reason or "").strip()[:240], status, now, handled),
+            )
+            row = conn.execute("SELECT * FROM unban_requests WHERE id = ?;", (cur.lastrowid,)).fetchone()
+            conn.commit()
+            return dict(row) if row else {}
+        finally:
+            conn.close()
+
+
+def list_unban_requests(limit: int = 100) -> List[Dict[str, Any]]:
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM unban_requests ORDER BY id DESC LIMIT ?;", (max(1, min(limit, 500)),)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def handle_unban_request(req_id: int, approve: bool = True) -> Tuple[bool, str, str]:
+    now = int(time.time())
+    with _DB_LOCK:
+        conn = get_conn()
+        try:
+            row = conn.execute("SELECT * FROM unban_requests WHERE id = ?;", (int(req_id),)).fetchone()
+            if not row:
+                return False, "解封申请记录不存在", ""
+            ip_val = row["ip"]
+            new_st = "approved" if approve else "rejected"
+            conn.execute("UPDATE unban_requests SET status = ?, handled_at = ? WHERE id = ?;", (new_st, now, int(req_id)))
+            conn.commit()
+        finally:
+            conn.close()
+    if approve:
+        remove_blacklist_ip(ip_val)
+        return True, f"已通过解封申请并解除 {ip_val} 封禁", ip_val
+    return True, f"已驳回 {ip_val} 的解封申请", ip_val
+
+
 def add_blacklist_ip(raw_ip: str, reason: str = "管理员手动封禁", source: str = "manual", expire_seconds: int = 86400) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     clean = normalize_ip(raw_ip)
     if not clean:
@@ -732,6 +825,12 @@ def _ensure_ipset_rules() -> bool:
             r_wl = subprocess.run([ipt_bin, "-C", chain, "-m", "set", "--match-set", IPSET_WL_V4, "src", "-j", "ACCEPT"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
             if r_wl.returncode != 0:
                 subprocess.run([ipt_bin, "-I", chain, "1", "-m", "set", "--match-set", IPSET_WL_V4, "src", "-j", "ACCEPT"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        # Allow blocked users to reach the /unban self-service portal port on INPUT when auto_unban_enabled=1
+        if get_setting("auto_unban_enabled", "1") == "1":
+            fw_port = str(int(os.environ.get("PORT", "8090")))
+            r_up = subprocess.run([ipt_bin, "-C", "INPUT", "-p", "tcp", "--dport", fw_port, "-j", "ACCEPT"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+            if r_up.returncode != 0:
+                subprocess.run([ipt_bin, "-I", "INPUT", "1", "-p", "tcp", "--dport", fw_port, "-j", "ACCEPT"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
 
         ip6t_bin = _find_bin("ip6tables")
         if ip6t_bin:

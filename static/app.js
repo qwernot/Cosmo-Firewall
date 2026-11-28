@@ -146,6 +146,7 @@ function switchTab(tab) {
   if (tab === "blacklist") loadBlacklist();
   if (tab === "whitelist") loadWhitelist();
   if (tab === "traps") loadTraps();
+  if (tab === "unban") loadUnbanRequests();
   if (tab === "settings") { loadSettings(); loadEvents(); }
 }
 
@@ -163,7 +164,7 @@ function toggleTheme() {
 // ----------------- Loaders -----------------
 
 async function refreshAll() {
-  await Promise.all([loadDashboard(), loadBlacklist(), loadWhitelist(), loadTraps(), loadSettings(), loadEvents()]);
+  await Promise.all([loadDashboard(), loadBlacklist(), loadWhitelist(), loadTraps(), loadUnbanRequests(), loadSettings(), loadEvents()]);
 }
 
 async function loadDashboard() {
@@ -312,10 +313,55 @@ async function loadSettings() {
   document.getElementById("setFullPort").checked = s.full_port_conntrack === "1";
   document.getElementById("setSshd").checked = s.sshd_monitor === "1";
   document.getElementById("setWeb").checked = s.web_monitor === "1";
+  document.getElementById("setAutoUnban").checked = s.auto_unban_enabled !== "0";
   document.getElementById("setThreshold").value = s.threshold || "5";
   document.getElementById("setWindow").value = s.window_sec || "600";
   document.getElementById("setBanDuration").value = s.ban_duration || "86400";
   document.getElementById("setTrustedPorts").value = s.trusted_service_ports || "22,7000,7001,8024";
+}
+
+async function loadUnbanRequests() {
+  const tbody = document.getElementById("unbanTbody");
+  if (!tbody) return;
+  const res = await api("/api/v1/unban_requests");
+  if (!res.success) return;
+  const items = res.requests || [];
+  if (!items.length) {
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center; color:var(--text-dim); padding:2.2rem;">暂无用户解封申请记录</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = items.map(r => {
+    const cf = formatDateTime(r.created_at);
+    const stBadge = r.status === "auto_approved"
+      ? '<span class="badge badge-success">已自动解封</span>'
+      : r.status === "approved"
+        ? '<span class="badge badge-primary">已人工通过</span>'
+        : r.status === "rejected"
+          ? '<span class="badge badge-danger">已驳回</span>'
+          : '<span class="badge badge-warning">待人工审核</span>';
+    const actions = r.status === "pending"
+      ? `<div style="display:flex; gap:0.35rem;"><button class="btn btn-primary btn-sm" onclick="handleUnbanDecision(${r.id}, true)">通过</button><button class="btn btn-outline btn-sm danger-text" onclick="handleUnbanDecision(${r.id}, false)">驳回</button></div>`
+      : `<span class="muted">-</span>`;
+    return `
+      <tr>
+        <td style="color:var(--text-dim);">#${r.id}</td>
+        <td><span class="ban-ip-code">${escapeHtml(r.ip)}</span></td>
+        <td style="white-space:normal; max-width:300px;">${escapeHtml(r.reason || "-")}</td>
+        <td>${stBadge}</td>
+        <td><span class="ban-time-main" title="${cf.full}">${cf.short}</span></td>
+        <td>${actions}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+async function handleUnbanDecision(id, approve) {
+  const res = await api(approve ? "/api/v1/unban_requests/approve" : "/api/v1/unban_requests/reject", {
+    method: "POST",
+    body: JSON.stringify({ id }),
+  });
+  if (res.success) { showToast(res.message); refreshAll(); }
+  else showToast(res.message || "操作失败", "error");
 }
 
 async function loadEvents() {
@@ -454,6 +500,7 @@ async function saveSettings(e) {
     full_port_conntrack: document.getElementById("setFullPort").checked ? "1" : "0",
     sshd_monitor: document.getElementById("setSshd").checked ? "1" : "0",
     web_monitor: document.getElementById("setWeb").checked ? "1" : "0",
+    auto_unban_enabled: document.getElementById("setAutoUnban").checked ? "1" : "0",
     threshold: document.getElementById("setThreshold").value,
     window_sec: document.getElementById("setWindow").value,
     ban_duration: document.getElementById("setBanDuration").value,

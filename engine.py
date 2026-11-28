@@ -303,7 +303,7 @@ class FirewallEngine:
                 or (len(active_ports) >= cross_limit and len(distinct_groups) >= 2)
                 or len(unassigned) >= 3
                 or len(active_ports) >= single_group_limit
-                or (len(active_ports) >= 2 and probe_pts >= 1)
+                or (len(active_ports) >= 3 and probe_pts >= 2)
             ):
                 ports_preview = ",".join(str(p) for p in active_ports[:6])
                 return self._trigger_ban(
@@ -360,7 +360,12 @@ class FirewallEngine:
                 continue
             sport = int(sport_s)
             dport = int(dport_s)
-            if dport < 1 or dport > 65535 or dport in trap_ports or dport == 22:
+            if (
+                dport < 1
+                or dport > 65535
+                or dport in trap_ports
+                or dport in (22, 80, 443, 8080, 8081, 8088, 8443, self.panel_port)
+            ):
                 continue
 
             clean_ip = database.normalize_ip(src_ip)

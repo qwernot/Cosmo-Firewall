@@ -291,8 +291,8 @@ class FirewallHandler(SimpleHTTPRequestHandler):
         if FW_ENGINE.inspect_panel_request(cip, getattr(self, "command", "GET"), path):
             self.send_json({"success": False, "message": "Forbidden"}, 403)
             return False
-        # Allow public self-service /unban portal even for blacklisted IPs so misbanned users can appeal & auto-unban
-        if path in ("/unban", "/unban.html", "/style.css", "/api/v1/public/unban/status", "/api/v1/public/unban/apply"):
+        # Allow public self-service /unban portal & favicon even for blacklisted IPs
+        if path in ("/unban", "/unban.html", "/style.css", "/favicon.ico", "/logo.svg", "/api/v1/public/unban/status", "/api/v1/public/unban/apply"):
             return True
         if database.is_ip_blacklisted(cip):
             self.send_json({"success": False, "message": "您的 IP 已被防火墙拦截，可访问 /unban 申请自助解封"}, 403)

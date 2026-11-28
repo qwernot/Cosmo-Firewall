@@ -121,7 +121,7 @@
                   <th>拦截封禁原因</th>
                   <th>封禁时间</th>
                   <th>到期时间 / 状态</th>
-                  <th style="width:96px;">操作</th>
+                  <th style="width:155px;">操作</th>
                 </tr>
               </thead>
               <tbody id="blacklistTbody"></tbody>
@@ -135,8 +135,8 @@
         <div class="card">
           <div class="card-header">
             <div>
-              <h2>IP 与网段白名单（最高放行优先级）</h2>
-              <p class="muted">加入白名单的 IP / CIDR 网段永远不会被自动防扫描封禁；若此前在黑名单中会自动解除，并在内核 iptables 中置于 DROP 之前优先放行。</p>
+              <h2>IP / 网段 / DDNS 域名白名单（最高放行优先级）</h2>
+              <p class="muted">支持单 IP、CIDR 网段（如 192.168.10.0/24）及动态 DDNS 域名（如 home.example.com，每 5 分钟自动解析最新 IP 同步至内核放行）。</p>
             </div>
             <div class="toolbar">
               <button class="btn btn-primary btn-sm" onclick="openModal('addWhitelistModal')">➕ 添加白名单</button>
@@ -235,6 +235,17 @@
               <div class="switch-row">
                 <label><input type="checkbox" id="setEnabled"> 启用整机自动防扫描总开关</label>
               </div>
+              <div class="form-group">
+                <label for="setDefenseMode">防御严格度模式</label>
+                <select id="setDefenseMode">
+                  <option value="safe">稳健模式（推荐多人商用 · 诱捕/爆破/漏洞秒封，conntrack 60秒连扫5口才封）</option>
+                  <option value="standard">标准模式（全端口严格扫段拦截，3口即封）</option>
+                  <option value="observe">观察模式（Dry-Run · 仅记录审计日志不真封，适合新机上线观察）</option>
+                </select>
+              </div>
+              <div class="switch-row">
+                <label><input type="checkbox" id="setProgressiveBan"> 开启渐进式阶梯封禁（首次封 15 分钟 → 二次 2 小时 → 三次起按最大时长，大幅降低大内网误封影响）</label>
+              </div>
               <div class="switch-row">
                 <label><input type="checkbox" id="setFullPort"> 开启全端口（1–65535）内核 conntrack 扫段监控</label>
               </div>
@@ -266,6 +277,10 @@
                   <label for="setTrustedPorts">在线会话免误封服务端口（逗号分隔）</label>
                   <input id="setTrustedPorts" type="text" placeholder="22,7000,7001,8024">
                 </div>
+              </div>
+              <div class="form-group">
+                <label for="setExcludedPorts">高并发业务端口豁免列表（不计入 conntrack 扫段，逗号分隔）</label>
+                <input id="setExcludedPorts" type="text" placeholder="80,443,8080,8081,8088,8443">
               </div>
               <button type="submit" class="btn btn-primary">💾 保存防扫描策略</button>
             </form>
@@ -360,8 +375,8 @@
       </div>
       <form onsubmit="submitAddWhitelist(event)">
         <div class="form-group">
-          <label for="wlEntryInput">IP 或 CIDR 网段（支持换行/逗号批量输入）</label>
-          <textarea id="wlEntryInput" rows="3" placeholder="例如：&#10;114.114.114.114&#10;192.168.10.0/24" required></textarea>
+          <label for="wlEntryInput">IP、CIDR 网段或 DDNS 域名（支持换行/逗号批量输入）</label>
+          <textarea id="wlEntryInput" rows="3" placeholder="例如：&#10;114.114.114.114&#10;192.168.10.0/24&#10;home.example.com" required></textarea>
         </div>
         <div class="form-group">
           <label for="wlNoteInput">备注说明</label>
@@ -405,6 +420,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=1.2"></script>
+  <script src="/app.js?v=1.3"></script>
 </body>
 </html>

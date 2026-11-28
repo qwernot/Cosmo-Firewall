@@ -382,6 +382,7 @@ class FirewallHandler(SimpleHTTPRequestHandler):
                     "trap_listening": listening_traps,
                     "trap_hits": total_trap_hits,
                     "defense_enabled": settings.get("defense_enabled", "1") == "1",
+                    "defense_mode": settings.get("defense_mode", "safe"),
                     "kernel": kernel,
                 },
             })
@@ -548,6 +549,17 @@ class FirewallHandler(SimpleHTTPRequestHandler):
                 if clean:
                     FW_ENGINE.recently_banned.pop(clean, None)
             self.send_json({"success": ok, "message": msg}, 200 if ok else 400)
+            return
+
+        if path == "/api/v1/blacklist/unban_and_whitelist":
+            raw_ip = str(body.get("ip") or "").strip()
+            note = str(body.get("note") or "黑名单一键解封并加白").strip()
+            ok, msg, item = database.add_whitelist_entry(raw_ip, note=note)
+            if ok and item:
+                clean = item["entry"]
+                FW_ENGINE.recently_banned.pop(clean, None)
+                FW_ENGINE.mark_trusted_ip(clean, ttl=86400)
+            self.send_json({"success": ok, "message": msg, "item": item}, 200 if ok else 400)
             return
 
         if path == "/api/v1/blacklist/clear":

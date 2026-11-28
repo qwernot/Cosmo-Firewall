@@ -86,8 +86,18 @@ class FirewallEngine:
             tok = tok.strip()
             if tok.isdigit():
                 trusted_ports.add(int(tok))
+        excluded_ports: Set[int] = {22, self.panel_port}
+        for tok in str(s.get("excluded_ports", "80,443,8080,8081,8088,8443")).split(","):
+            tok = tok.strip()
+            if tok.isdigit():
+                excluded_ports.add(int(tok))
+        mode = str(s.get("defense_mode", "safe") or "safe").strip().lower()
+        if mode not in ("safe", "standard", "observe"):
+            mode = "safe"
         return {
             "enabled": s.get("defense_enabled", "1") == "1",
+            "mode": mode,
+            "progressive_ban": s.get("progressive_ban", "1") == "1",
             "threshold": max(2, int(s.get("threshold", "5") or "5")),
             "ban_duration": max(60, int(s.get("ban_duration", "86400") or "86400")),
             "window_sec": max(30, int(s.get("window_sec", "600") or "600")),
@@ -95,6 +105,7 @@ class FirewallEngine:
             "sshd_monitor": s.get("sshd_monitor", "1") == "1",
             "web_monitor": s.get("web_monitor", "1") == "1",
             "trusted_service_ports": trusted_ports,
+            "excluded_ports": excluded_ports,
             "auto_trust_ttl": max(300, int(s.get("auto_trust_ttl", "7200") or "7200")),
         }
 
@@ -164,6 +175,8 @@ class FirewallEngine:
             return False
         if self._has_live_trusted_socket(clean_ip):
             return False
+
+        pol = self.get_policy()
         with self.lock:
             if now - self.recently_banned.get(clean_ip, 0.0) < 120:
                 return False
@@ -173,13 +186,28 @@ class FirewallEngine:
             self.port_conns.pop(clean_ip, None)
             self.port_groups.pop(clean_ip, None)
 
+        # Observe (Dry-Run) mode: log what would have been banned without blocking
+        if pol["mode"] == "observe":
+            database.record_event("observe_hit", ip=clean_ip, detail=f"[观察模式-未拦截] {reason}")
+            print(f"👀 [Cosmo Firewall 观察模式] 命中规则(未封禁) {clean_ip} | {reason}", flush=True)
+            return False
+
         if database.is_ip_blacklisted(clean_ip):
             database.apply_firewall_drop(clean_ip)
             return False
 
-        ok, _, _ = database.add_blacklist_ip(clean_ip, reason=reason, source=source, expire_seconds=ban_duration)
+        # Progressive ban duration: 1st offense -> 15m, 2nd -> 2h, 3rd+ -> full ban_duration
+        effective_duration = ban_duration
+        if pol["progressive_ban"] and ban_duration > 900:
+            prior = database.count_recent_auto_bans(clean_ip, hours=24)
+            if prior == 0:
+                effective_duration = min(ban_duration, 900)
+            elif prior == 1:
+                effective_duration = min(ban_duration, 7200)
+
+        ok, _, _ = database.add_blacklist_ip(clean_ip, reason=reason, source=source, expire_seconds=effective_duration)
         if ok:
-            print(f"🛡️ [Cosmo Firewall] 自动封禁 {clean_ip} | {reason} | 时长 {ban_duration}s", flush=True)
+            print(f"🛡️ [Cosmo Firewall] 自动封禁 {clean_ip} | {reason} | 时长 {effective_duration}s", flush=True)
         return ok
 
     # ----------------- Detection Core -----------------
@@ -298,13 +326,23 @@ class FirewallEngine:
             cross_limit = max(3, min(threshold - 1, 4))
             single_group_limit = max(6, threshold + 1)
 
-            if (
-                (len(active_ports) >= 3 and len(distinct_groups) >= 3)
-                or (len(active_ports) >= cross_limit and len(distinct_groups) >= 2)
-                or len(unassigned) >= 3
-                or len(active_ports) >= single_group_limit
-                or (len(active_ports) >= 3 and probe_pts >= 2)
-            ):
+            if pol["mode"] == "safe":
+                # Safe multi-user mode: only trigger conntrack horizontal sweep on rapid >=5 distinct ports within 60s
+                recent_ports_60s = sorted(p for p, h in ip_ports.items() if any(now - t <= 60 for t in h))
+                triggered_sweep = (
+                    len(recent_ports_60s) >= 5
+                    or (len(active_ports) >= 4 and probe_pts >= 2)
+                )
+            else:
+                triggered_sweep = (
+                    (len(active_ports) >= 3 and len(distinct_groups) >= 3)
+                    or (len(active_ports) >= cross_limit and len(distinct_groups) >= 2)
+                    or len(unassigned) >= 3
+                    or len(active_ports) >= single_group_limit
+                    or (len(active_ports) >= 3 and probe_pts >= 2)
+                )
+
+            if triggered_sweep:
                 ports_preview = ",".join(str(p) for p in active_ports[:6])
                 return self._trigger_ban(
                     clean_ip,
@@ -349,6 +387,7 @@ class FirewallEngine:
         with self.lock:
             trap_ports = set(self.trap_sockets.keys())
         trusted_svc = pol["trusted_service_ports"]
+        excluded = pol["excluded_ports"]
 
         bans = 0
         for raw_ln in lines:
@@ -360,12 +399,7 @@ class FirewallEngine:
                 continue
             sport = int(sport_s)
             dport = int(dport_s)
-            if (
-                dport < 1
-                or dport > 65535
-                or dport in trap_ports
-                or dport in (22, 80, 443, 8080, 8081, 8088, 8443, self.panel_port)
-            ):
+            if dport < 1 or dport > 65535 or dport in trap_ports or dport in excluded:
                 continue
 
             clean_ip = database.normalize_ip(src_ip)
@@ -701,6 +735,7 @@ class FirewallEngine:
         self._poll_conntrack(time.time())
 
         last_clean = time.time()
+        last_ddns = time.time()
         last_ct = time.time()
         last_sshd = 0.0
 
@@ -712,6 +747,10 @@ class FirewallEngine:
                     last_clean = now
                     database.clean_expired_blacklist()
                     self._prune_memory(now)
+
+                if now - last_ddns >= 300:
+                    last_ddns = now
+                    database.refresh_ddns_whitelist()
 
                 pol = self.get_policy()
                 if not pol["enabled"]:

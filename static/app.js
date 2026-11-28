@@ -180,8 +180,19 @@ async function loadDashboard() {
   document.getElementById("statDroppedPkts").textContent = (s.kernel?.dropped_packets || 0).toLocaleString();
 
   const statusEl = document.getElementById("statDefenseStatus");
-  statusEl.textContent = s.defense_enabled ? "运行中" : "已暂停";
-  statusEl.style.color = s.defense_enabled ? "var(--success)" : "var(--warning)";
+  if (!s.defense_enabled) {
+    statusEl.textContent = "已暂停";
+    statusEl.style.color = "var(--warning)";
+  } else if (s.defense_mode === "observe") {
+    statusEl.textContent = "观察模式";
+    statusEl.style.color = "var(--info)";
+  } else if (s.defense_mode === "standard") {
+    statusEl.textContent = "标准拦截";
+    statusEl.style.color = "var(--success)";
+  } else {
+    statusEl.textContent = "稳健运行";
+    statusEl.style.color = "var(--success)";
+  }
 
   const kBadge = document.getElementById("kernelModeBadge");
   if (s.kernel?.mode === "ipset+iptables") {
@@ -241,7 +252,12 @@ function renderBlacklist() {
         <td class="ban-reason-td">${formatBanReasonCell(item.reason, item.source)}</td>
         <td><div class="ban-time-cell" title="${cf.full}"><span class="ban-time-main">${cf.short}</span></div></td>
         <td>${expHtml}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteBan(${item.id}, '${escapeHtml(item.ip)}')">解封</button></td>
+        <td>
+          <div style="display:flex; gap:0.35rem;">
+            <button class="btn btn-danger btn-sm" onclick="deleteBan(${item.id}, '${escapeHtml(item.ip)}')">解封</button>
+            <button class="btn btn-outline btn-sm" style="color:var(--success); border-color:rgba(16,185,129,0.38);" onclick="unbanAndWhitelist('${escapeHtml(item.ip)}')" title="立即解封并将此 IP 加入永久白名单">加白</button>
+          </div>
+        </td>
       </tr>
     `;
   }).join("");
@@ -258,10 +274,13 @@ async function loadWhitelist() {
   }
   tbody.innerHTML = whitelistCache.map(item => {
     const cf = formatDateTime(item.created_at);
+    const ddnsTag = item.is_domain
+      ? ` <span class="badge badge-primary" title="动态 DDNS 域名，每5分钟自动解析">DDNS</span>${item.resolved_ip ? ` <span class="ban-meta-chip" title="当前解析 IP">→ ${escapeHtml(item.resolved_ip)}</span>` : ' <span class="muted" style="font-size:0.75rem;">(待解析)</span>'}`
+      : "";
     return `
       <tr>
         <td style="color:var(--text-dim);">#${item.id}</td>
-        <td><span class="wl-ip-code">${escapeHtml(item.entry)}</span></td>
+        <td><span class="wl-ip-code">${escapeHtml(item.entry)}</span>${ddnsTag}</td>
         <td style="white-space:normal;">${escapeHtml(item.note || "-")}</td>
         <td><span class="ban-time-main" title="${cf.full}">${cf.short}</span></td>
         <td><button class="btn btn-outline btn-sm danger-text" onclick="deleteWhitelist(${item.id}, '${escapeHtml(item.entry)}')">移除</button></td>
@@ -310,6 +329,8 @@ async function loadSettings() {
   if (!res.success) return;
   const s = res.settings;
   document.getElementById("setEnabled").checked = s.defense_enabled === "1";
+  document.getElementById("setDefenseMode").value = s.defense_mode || "safe";
+  document.getElementById("setProgressiveBan").checked = s.progressive_ban !== "0";
   document.getElementById("setFullPort").checked = s.full_port_conntrack === "1";
   document.getElementById("setSshd").checked = s.sshd_monitor === "1";
   document.getElementById("setWeb").checked = s.web_monitor === "1";
@@ -318,6 +339,7 @@ async function loadSettings() {
   document.getElementById("setWindow").value = s.window_sec || "600";
   document.getElementById("setBanDuration").value = s.ban_duration || "86400";
   document.getElementById("setTrustedPorts").value = s.trusted_service_ports || "22,7000,7001,8024";
+  document.getElementById("setExcludedPorts").value = s.excluded_ports || "80,443,8080,8081,8088,8443";
 }
 
 async function loadUnbanRequests() {
@@ -376,6 +398,7 @@ async function loadEvents() {
   list.innerHTML = evs.map(e => {
     const f = formatDateTime(e.created_at);
     const badge = e.event_type === "ban" ? '<span class="badge badge-danger">封禁</span>'
+      : e.event_type === "observe_hit" ? '<span class="badge badge-primary">观察命中</span>'
       : e.event_type === "trap_hit" ? '<span class="badge badge-warning">诱捕触碰</span>'
       : e.event_type === "unban" ? '<span class="badge badge-outline">解封</span>'
       : '<span class="badge badge-success">白名单</span>';
@@ -418,6 +441,16 @@ async function deleteBan(id, ip) {
   const res = await api("/api/v1/blacklist/delete", { method: "POST", body: JSON.stringify({ id, ip }) });
   if (res.success) { showToast(res.message); refreshAll(); }
   else showToast(res.message || "解封失败", "error");
+}
+
+async function unbanAndWhitelist(ip) {
+  if (!confirm(`确认立即解封 IP ${ip} 并将其加入永久白名单（以后绝不再误封）？`)) return;
+  const res = await api("/api/v1/blacklist/unban_and_whitelist", {
+    method: "POST",
+    body: JSON.stringify({ ip, note: "黑名单一键解封并加白" }),
+  });
+  if (res.success) { showToast(res.message); refreshAll(); }
+  else showToast(res.message || "操作失败", "error");
 }
 
 async function clearAutoBans() {
@@ -497,6 +530,8 @@ async function saveSettings(e) {
   e.preventDefault();
   const payload = {
     defense_enabled: document.getElementById("setEnabled").checked ? "1" : "0",
+    defense_mode: document.getElementById("setDefenseMode").value,
+    progressive_ban: document.getElementById("setProgressiveBan").checked ? "1" : "0",
     full_port_conntrack: document.getElementById("setFullPort").checked ? "1" : "0",
     sshd_monitor: document.getElementById("setSshd").checked ? "1" : "0",
     web_monitor: document.getElementById("setWeb").checked ? "1" : "0",
@@ -505,6 +540,7 @@ async function saveSettings(e) {
     window_sec: document.getElementById("setWindow").value,
     ban_duration: document.getElementById("setBanDuration").value,
     trusted_service_ports: document.getElementById("setTrustedPorts").value,
+    excluded_ports: document.getElementById("setExcludedPorts").value,
   };
   const res = await api("/api/v1/settings", { method: "POST", body: JSON.stringify(payload) });
   if (res.success) { showToast(res.message); refreshAll(); }

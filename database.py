@@ -56,6 +56,8 @@ DEFAULT_TRAP_PORTS = [
 DEFAULT_SETTINGS = {
     "site_title": "Cosmo Firewall",
     "defense_enabled": "1",
+    "defense_mode": "safe",           # safe (稳健推荐) | standard (标准) | observe (仅观察不封禁)
+    "progressive_ban": "1",           # 1=阶梯封禁(15m->2h->24h), 0=直接按ban_duration封禁
     "threshold": "5",
     "ban_duration": "86400",
     "window_sec": "600",
@@ -63,10 +65,13 @@ DEFAULT_SETTINGS = {
     "sshd_monitor": "1",
     "web_monitor": "1",
     "trusted_service_ports": "22,7000,7001,8024",
+    "excluded_ports": "80,443,8080,8081,8088,8443",
     "auto_trust_ttl": "7200",
     "auto_unban_enabled": "1",
     "auto_unban_daily_limit": "2",
 }
+
+_DOMAIN_RE = re.compile(r"^(?=.{3,253}$)(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,24}$")
 
 
 def get_conn() -> sqlite3.Connection:
@@ -222,6 +227,8 @@ def init_db():
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     entry TEXT UNIQUE NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
+                    is_domain INTEGER NOT NULL DEFAULT 0,
+                    resolved_ip TEXT NOT NULL DEFAULT '',
                     created_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS trap_ports (
@@ -265,6 +272,12 @@ def init_db():
             # Seed default settings
             for k, v in DEFAULT_SETTINGS.items():
                 conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?);", (k, v))
+            # Safe schema migration for existing ip_whitelist tables
+            wl_cols = {r["name"] for r in conn.execute("PRAGMA table_info(ip_whitelist);").fetchall()}
+            if "is_domain" not in wl_cols:
+                conn.execute("ALTER TABLE ip_whitelist ADD COLUMN is_domain INTEGER NOT NULL DEFAULT 0;")
+            if "resolved_ip" not in wl_cols:
+                conn.execute("ALTER TABLE ip_whitelist ADD COLUMN resolved_ip TEXT NOT NULL DEFAULT '';")
             # Seed default trap ports only if table is empty
             cnt = conn.execute("SELECT COUNT(*) AS c FROM trap_ports;").fetchone()["c"]
             if cnt == 0:
@@ -434,6 +447,24 @@ def list_whitelist() -> List[Dict[str, Any]]:
         conn.close()
 
 
+def resolve_domain_ip(domain: str) -> Optional[str]:
+    """Resolve a DDNS domain name to an IPv4 (preferred) or IPv6 address."""
+    import socket
+    try:
+        infos = socket.getaddrinfo(domain, None, socket.AF_INET, socket.SOCK_STREAM)
+        if infos:
+            return normalize_ip(infos[0][4][0])
+    except Exception:
+        pass
+    try:
+        infos = socket.getaddrinfo(domain, None, socket.AF_INET6, socket.SOCK_STREAM)
+        if infos:
+            return normalize_ip(infos[0][4][0])
+    except Exception:
+        pass
+    return None
+
+
 def is_ip_whitelisted(raw_ip: str) -> bool:
     clean = normalize_ip(raw_ip)
     if not clean:
@@ -444,16 +475,18 @@ def is_ip_whitelisted(raw_ip: str) -> bool:
         return False
     conn = get_conn()
     try:
-        rows = conn.execute("SELECT entry FROM ip_whitelist;").fetchall()
+        rows = conn.execute("SELECT entry, is_domain, resolved_ip FROM ip_whitelist;").fetchall()
         for r in rows:
-            entry = r["entry"]
+            target = (r["resolved_ip"] if r["is_domain"] else r["entry"]) or ""
+            if not target:
+                continue
             try:
-                if "/" in entry:
-                    net = ipaddress.ip_network(entry, strict=False)
+                if "/" in target:
+                    net = ipaddress.ip_network(target, strict=False)
                     if parsed.version == net.version and parsed in net:
                         return True
                 else:
-                    if ipaddress.ip_address(entry) == parsed:
+                    if ipaddress.ip_address(target) == parsed:
                         return True
             except Exception:
                 continue
@@ -463,28 +496,86 @@ def is_ip_whitelisted(raw_ip: str) -> bool:
 
 
 def add_whitelist_entry(raw_entry: str, note: str = "") -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    clean = normalize_ip_or_cidr(raw_entry)
+    s = str(raw_entry or "").strip()
+    clean = normalize_ip_or_cidr(s)
+    is_dom = 0
+    resolved = ""
     if not clean:
-        return False, f"无效的 IP 或网段格式: {raw_entry}", None
+        if _DOMAIN_RE.match(s.lower()):
+            clean = s.lower()
+            is_dom = 1
+            resolved = resolve_domain_ip(clean) or ""
+        else:
+            return False, f"无效的 IP、CIDR 网段或域名格式: {raw_entry}", None
     now = int(time.time())
     with _DB_LOCK:
         conn = get_conn()
         try:
             conn.execute(
-                "INSERT INTO ip_whitelist (entry, note, created_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(entry) DO UPDATE SET note = excluded.note;",
-                (clean, (note or "").strip() or "管理员白名单", now),
+                "INSERT INTO ip_whitelist (entry, note, is_domain, resolved_ip, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(entry) DO UPDATE SET note = excluded.note, is_domain = excluded.is_domain, resolved_ip = excluded.resolved_ip;",
+                (clean, (note or "").strip() or ("DDNS 动态白名单" if is_dom else "管理员白名单"), is_dom, resolved, now),
             )
             row = conn.execute("SELECT * FROM ip_whitelist WHERE entry = ?;", (clean,)).fetchone()
             conn.commit()
         finally:
             conn.close()
-    # If single IP was in blacklist, immediately remove it
-    if "/" not in clean:
-        remove_blacklist_ip(clean)
-    apply_firewall_whitelist(clean)
-    record_event("whitelist_add", ip=clean, detail=note or "加入白名单")
-    return True, f"已将 {clean} 加入白名单", dict(row) if row else None
+
+    effective_target = resolved if is_dom else clean
+    if effective_target:
+        if "/" not in effective_target:
+            remove_blacklist_ip(effective_target)
+        apply_firewall_whitelist(effective_target)
+    detail = f"{note or '加入白名单'}" + (f" (当前解析: {resolved})" if is_dom and resolved else "")
+    record_event("whitelist_add", ip=effective_target or clean, detail=detail)
+    msg = f"已将 {clean} 加入白名单" + (f"（当前解析 IP: {resolved}）" if is_dom and resolved else ("（域名暂未解析到 IP，后台将持续自动同步）" if is_dom else ""))
+    return True, msg, dict(row) if row else None
+
+
+def refresh_ddns_whitelist() -> int:
+    """Re-resolve all DDNS domain whitelist entries and sync kernel ipset if IP changed."""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT id, entry, resolved_ip FROM ip_whitelist WHERE is_domain = 1;").fetchall()
+    finally:
+        conn.close()
+    changed = 0
+    for r in rows:
+        dom = r["entry"]
+        old_ip = r["resolved_ip"] or ""
+        new_ip = resolve_domain_ip(dom) or ""
+        if new_ip and new_ip != old_ip:
+            with _DB_LOCK:
+                c2 = get_conn()
+                try:
+                    c2.execute("UPDATE ip_whitelist SET resolved_ip = ? WHERE id = ?;", (new_ip, r["id"]))
+                    c2.commit()
+                finally:
+                    c2.close()
+            if old_ip:
+                remove_firewall_whitelist(old_ip)
+            remove_blacklist_ip(new_ip)
+            apply_firewall_whitelist(new_ip)
+            record_event("whitelist_ddns", ip=new_ip, detail=f"DDNS 域名 {dom} 动态 IP 更新: {old_ip or '无'} -> {new_ip}")
+            changed += 1
+    return changed
+
+
+def count_recent_auto_bans(raw_ip: str, hours: int = 24) -> int:
+    """Count how many times this IP was auto-banned in the past N hours (for progressive ban duration)."""
+    clean = normalize_ip(raw_ip)
+    if not clean:
+        return 0
+    since = int(time.time()) - hours * 3600
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM event_logs WHERE event_type = 'ban' AND ip = ? AND created_at >= ?;",
+            (clean, since),
+        ).fetchone()
+        return int(row["c"]) if row else 0
+    finally:
+        conn.close()
 
 
 def remove_whitelist_entry(entry_or_id: Any) -> Tuple[bool, str]:
@@ -495,16 +586,18 @@ def remove_whitelist_entry(entry_or_id: Any) -> Tuple[bool, str]:
                 row = conn.execute("SELECT * FROM ip_whitelist WHERE id = ?;", (int(entry_or_id),)).fetchone()
             else:
                 clean = normalize_ip_or_cidr(str(entry_or_id))
-                row = conn.execute("SELECT * FROM ip_whitelist WHERE entry = ?;", (clean or str(entry_or_id),)).fetchone()
+                row = conn.execute("SELECT * FROM ip_whitelist WHERE entry = ?;", (clean or str(entry_or_id).strip().lower(),)).fetchone()
             if not row:
                 return False, "白名单记录不存在"
             entry = row["entry"]
+            fw_target = row["resolved_ip"] if row["is_domain"] else entry
             conn.execute("DELETE FROM ip_whitelist WHERE id = ?;", (row["id"],))
             conn.commit()
         finally:
             conn.close()
-    remove_firewall_whitelist(entry)
-    record_event("whitelist_del", ip=entry, detail="移出白名单")
+    if fw_target:
+        remove_firewall_whitelist(fw_target)
+    record_event("whitelist_del", ip=fw_target or entry, detail=f"移出白名单 ({entry})")
     return True, f"已将 {entry} 移出白名单"
 
 
@@ -928,10 +1021,13 @@ def remove_firewall_whitelist(entry: str):
 def sync_all_firewall_rules() -> Dict[str, Any]:
     """Re-apply all active blacklist & whitelist entries into kernel ipset/iptables."""
     clean_expired_blacklist()
+    refresh_ddns_whitelist()
     wl = list_whitelist()
     bl = list_blacklist(include_expired=False)
     for item in wl:
-        apply_firewall_whitelist(item["entry"])
+        target = item["resolved_ip"] if item.get("is_domain") else item["entry"]
+        if target:
+            apply_firewall_whitelist(target)
     for item in bl:
         apply_firewall_drop(item["ip"])
     return {

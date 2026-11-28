@@ -122,13 +122,24 @@ class TestCosmoFirewall(unittest.TestCase):
         ], now=now)
         self.assertFalse(database.is_ip_blacklisted("198.51.100.30"))
 
-        # Full-port sweep (23, 3306, 55555) auto-banned
+        # Full-port sweep: in default 'safe' mode, 3 ports does NOT false-ban, while rapid 5 ports DOES ban
         eng.process_conntrack_lines([
             "tcp      6 5 TIME_WAIT src=198.51.100.31 dst=172.18.0.2 sport=42001 dport=23 src=172.18.0.2 dst=198.51.100.31 sport=23 dport=42001",
             "tcp      6 5 TIME_WAIT src=198.51.100.31 dst=172.18.0.2 sport=42002 dport=3306 src=172.18.0.2 dst=198.51.100.31 sport=3306 dport=42002",
             "tcp      6 5 TIME_WAIT src=198.51.100.31 dst=172.18.0.2 sport=42003 dport=55555 src=172.18.0.2 dst=198.51.100.31 sport=55555 dport=42003",
         ], now=now + 1)
+        self.assertFalse(database.is_ip_blacklisted("198.51.100.31"))
+
+        eng.process_conntrack_lines([
+            "tcp      6 5 TIME_WAIT src=198.51.100.31 dst=172.18.0.2 sport=42004 dport=6379 src=172.18.0.2 dst=198.51.100.31 sport=6379 dport=42004",
+            "tcp      6 5 TIME_WAIT src=198.51.100.31 dst=172.18.0.2 sport=42005 dport=9200 src=172.18.0.2 dst=198.51.100.31 sport=9200 dport=42005",
+        ], now=now + 2)
         self.assertTrue(database.is_ip_blacklisted("198.51.100.31"))
+
+        # Progressive ban: 1st offense duration is capped at 900s (15 min) instead of 86400s
+        entry31 = database.get_blacklist_entry("198.51.100.31")
+        self.assertIsNotNone(entry31)
+        self.assertLessEqual(entry31["remaining_seconds"], 905)
 
         # Docker NPM exploit path scan auto-banned
         npm_lines = [
@@ -194,6 +205,33 @@ class TestCosmoFirewall(unittest.TestCase):
         st4, _ = self._req("/api/v1/unban_requests/approve", "POST", {"id": pending[0]["id"]}, token=self.token)
         self.assertEqual(st4, 200)
         self.assertFalse(database.is_ip_blacklisted("198.51.100.89"))
+
+    def test_07_observe_mode_unban_whitelist_and_ddns(self):
+        # 1. Observe (Dry-Run) mode logs hit without banning
+        database.set_setting("defense_mode", "observe")
+        eng = server.FW_ENGINE
+        now = time.time()
+        eng.record_trap_hit("198.51.100.91", 18888, now=now)
+        eng.record_trap_hit("198.51.100.91", 18889, now=now + 0.5)
+        self.assertFalse(database.is_ip_blacklisted("198.51.100.91"))
+        evs = database.list_events(limit=10)
+        self.assertTrue(any(e["event_type"] == "observe_hit" and e["ip"] == "198.51.100.91" for e in evs))
+        database.set_setting("defense_mode", "safe")
+
+        # 2. One-click unban & whitelist API
+        database.add_blacklist_ip("198.51.100.92", reason="test", source="auto_scan", expire_seconds=900)
+        st, res = self._req("/api/v1/blacklist/unban_and_whitelist", "POST", {"ip": "198.51.100.92"}, token=self.token)
+        self.assertEqual(st, 200)
+        self.assertTrue(res["success"])
+        self.assertFalse(database.is_ip_blacklisted("198.51.100.92"))
+        self.assertTrue(database.is_ip_whitelisted("198.51.100.92"))
+
+        # 3. DDNS domain whitelist support
+        ok_d, _, item_d = database.add_whitelist_entry("ddns-test.example.invalid", note="测试DDNS")
+        self.assertTrue(ok_d)
+        self.assertEqual(item_d["is_domain"], 1)
+        database.remove_whitelist_entry("ddns-test.example.invalid")
+        database.remove_whitelist_entry("198.51.100.92")
 
 
 if __name__ == "__main__":
